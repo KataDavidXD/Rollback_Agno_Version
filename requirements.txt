@@ -1,0 +1,4 @@
+  agno>=0.1.0
+  openai
+  sqlalchemy
+  packaging
