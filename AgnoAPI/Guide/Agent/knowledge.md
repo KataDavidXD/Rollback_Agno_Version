@@ -1,0 +1,261 @@
+# Knowledge
+
+**Knowledge** is domain-specific information that the Agent can **search** at runtime to make better decisions (dynamic few-shot learning) and provide accurate responses (agentic RAG). Knowledge is stored in a vector db and this **searching on demand** pattern is called Agentic RAG.
+
+<Accordion title="Dynamic Few-Shot Learning: Text2Sql Agent" icon="database">
+  Example: If we're building a Text2Sql Agent, we'll need to give the table schemas, column names, data types, example queries, common "gotchas" to help it generate the best-possible SQL query.
+
+  We're obviously not going to put this all in the system prompt, instead we store this information in a vector database and let the Agent query it at runtime.
+
+  Using this information, the Agent can then generate the best-possible SQL query. This is called dynamic few-shot learning.
+</Accordion>
+
+**Agno Agents use Agentic RAG** by default, meaning when we provide `knowledge` to an Agent, it will search this knowledge base, at runtime, for the specific information it needs to achieve its task.
+
+The pseudo steps for adding knowledge to an Agent are:
+
+```python
+from agno.agent import Agent, AgentKnowledge
+
+# Create a knowledge base for the Agent
+knowledge_base = AgentKnowledge(vector_db=...)
+
+# Add information to the knowledge base
+knowledge_base.load_text("The sky is blue")
+
+# Add the knowledge base to the Agent and
+# give it a tool to search the knowledge base as needed
+agent = Agent(knowledge=knowledge_base, search_knowledge=True)
+```
+
+We can give our agent access to the knowledge base in the following ways:
+
+* We can set `search_knowledge=True` to add a `search_knowledge_base()` tool to the Agent. `search_knowledge` is `True` **by default** if you add `knowledge` to an Agent.
+* We can set `add_references=True` to automatically add references from the knowledge base to the Agent's prompt. This is the traditional 2023 RAG approach.
+
+<Tip>
+  If you need complete control over the knowledge base search, you can pass your own `retriever` function with the following signature:
+
+  ```python
+  def retriever(agent: Agent, query: str, num_documents: Optional[int], **kwargs) -> Optional[list[dict]]:
+    ...
+  ```
+
+  This function is called during `search_knowledge_base()` and is used by the Agent to retrieve references from the knowledge base.
+</Tip>
+
+## Vector Databases
+
+While any type of storage can act as a knowledge base, vector databases offer the best solution for retrieving relevant results from dense information quickly. Here's how vector databases are used with Agents:
+
+<Steps>
+  <Step title="Chunk the information">
+    Break down the knowledge into smaller chunks to ensure our search query
+    returns only relevant results.
+  </Step>
+
+  <Step title="Load the knowledge base">
+    Convert the chunks into embedding vectors and store them in a vector
+    database.
+  </Step>
+
+  <Step title="Search the knowledge base">
+    When the user sends a message, we convert the input message into an
+    embedding and "search" for nearest neighbors in the vector database.
+  </Step>
+</Steps>
+
+<Note>
+  Knowledge filters are currently supported on the following knowledge base types: <b>PDF</b>, <b>PDF\_URL</b>, <b>Text</b>, <b>JSON</b>, and <b>DOCX</b>.
+  For more details, see the [Knowledge Filters documentation](/filters/introduction).
+</Note>
+
+## Example: RAG Agent with a PDF Knowledge Base
+
+Let's build a **RAG Agent** that answers questions from a PDF.
+
+### Step 1: Run PgVector
+
+Let's use `PgVector` as our vector db as it can also provide storage for our Agents.
+
+Install [docker desktop](https://docs.docker.com/desktop/install/mac-install/) and run **PgVector** on port **5532** using:
+
+```bash
+docker run -d \
+  -e POSTGRES_DB=ai \
+  -e POSTGRES_USER=ai \
+  -e POSTGRES_PASSWORD=ai \
+  -e PGDATA=/var/lib/postgresql/data/pgdata \
+  -v pgvolume:/var/lib/postgresql/data \
+  -p 5532:5432 \
+  --name pgvector \
+  agnohq/pgvector:16
+```
+
+### Step 2: Traditional RAG
+
+Retrieval Augmented Generation (RAG) means **"stuffing the prompt with relevant information"** to improve the model's response. This is a 2 step process:
+
+1. Retrieve relevant information from the knowledge base.
+2. Augment the prompt to provide context to the model.
+
+Let's build a **traditional RAG** Agent that answers questions from a PDF of recipes.
+
+<Steps>
+  <Step title="Install libraries">
+    Install the required libraries using pip
+
+    <CodeGroup>
+      ```bash Mac
+      pip install -U pgvector pypdf "psycopg[binary]" sqlalchemy
+      ```
+
+      ```bash Windows
+      pip install -U pgvector pypdf "psycopg[binary]" sqlalchemy
+      ```
+    </CodeGroup>
+  </Step>
+
+  <Step title="Create a Traditional RAG Agent">
+    Create a file `traditional_rag.py` with the following contents
+
+    ```python traditional_rag.py
+    from agno.agent import Agent
+    from agno.models.openai import OpenAIChat
+    from agno.knowledge.pdf_url import PDFUrlKnowledgeBase
+    from agno.vectordb.pgvector import PgVector, SearchType
+
+    db_url = "postgresql+psycopg://ai:ai@localhost:5532/ai"
+    knowledge_base = PDFUrlKnowledgeBase(
+        # Read PDF from this URL
+        urls=["https://agno-public.s3.amazonaws.com/recipes/ThaiRecipes.pdf"],
+        # Store embeddings in the `ai.recipes` table
+        vector_db=PgVector(table_name="recipes", db_url=db_url, search_type=SearchType.hybrid),
+    )
+    # Load the knowledge base: Comment after first run
+    knowledge_base.load(upsert=True)
+
+    agent = Agent(
+        model=OpenAIChat(id="gpt-4o"),
+        knowledge=knowledge_base,
+        # Enable RAG by adding references from AgentKnowledge to the user prompt.
+        add_references=True,
+        # Set as False because Agents default to `search_knowledge=True`
+        search_knowledge=False,
+        markdown=True,
+        # debug_mode=True,
+    )
+    agent.print_response("How do I make chicken and galangal in coconut milk soup")
+    ```
+  </Step>
+
+  <Step title="Run the agent">
+    Run the agent (it takes a few seconds to load the knowledge base).
+
+    <CodeGroup>
+      ```bash Mac
+      python traditional_rag.py
+      ```
+
+      ```bash Windows
+      python traditional_rag.py
+      ```
+    </CodeGroup>
+
+    <br />
+  </Step>
+</Steps>
+
+<Accordion title="How to use local PDFs" icon="file-pdf" iconType="duotone">
+  If you want to use local PDFs, use a `PDFKnowledgeBase` instead
+
+  ```python agent.py
+  from agno.knowledge.pdf import PDFKnowledgeBase
+
+  ...
+  knowledge_base = PDFKnowledgeBase(
+      path="data/pdfs",
+      vector_db=PgVector(
+          table_name="pdf_documents",
+          db_url=db_url,
+      ),
+  )
+  ...
+  ```
+</Accordion>
+
+### Step 3: Agentic RAG
+
+With traditional RAG above, `add_references=True` always adds information from the knowledge base to the prompt, regardless of whether it is relevant to the question or helpful.
+
+With Agentic RAG, we let the Agent decide **if** it needs to access the knowledge base and what search parameters it needs to query the knowledge base.
+
+Set `search_knowledge=True` and `read_chat_history=True`, giving the Agent tools to search its knowledge and chat history on demand.
+
+<Steps>
+  <Step title="Create an Agentic RAG Agent">
+    Create a file `agentic_rag.py` with the following contents
+
+    ```python agentic_rag.py
+    from agno.agent import Agent
+    from agno.models.openai import OpenAIChat
+    from agno.knowledge.pdf_url import PDFUrlKnowledgeBase
+    from agno.vectordb.pgvector import PgVector, SearchType
+
+    db_url = "postgresql+psycopg://ai:ai@localhost:5532/ai"
+    knowledge_base = PDFUrlKnowledgeBase(
+        urls=["https://agno-public.s3.amazonaws.com/recipes/ThaiRecipes.pdf"],
+        vector_db=PgVector(table_name="recipes", db_url=db_url, search_type=SearchType.hybrid),
+    )
+    # Load the knowledge base: Comment out after first run
+    knowledge_base.load(upsert=True)
+
+    agent = Agent(
+        model=OpenAIChat(id="gpt-4o"),
+        knowledge=knowledge_base,
+        # Add a tool to search the knowledge base which enables agentic RAG.
+        search_knowledge=True,
+        # Add a tool to read chat history.
+        read_chat_history=True,
+        show_tool_calls=True,
+        markdown=True,
+        # debug_mode=True,
+    )
+    agent.print_response("How do I make chicken and galangal in coconut milk soup", stream=True)
+    agent.print_response("What was my last question?", markdown=True)
+    ```
+  </Step>
+
+  <Step title="Run the agent">
+    Run the agent
+
+    <CodeGroup>
+      ```bash Mac
+      python agentic_rag.py
+      ```
+
+      ```bash Windows
+      python agentic_rag.py
+      ```
+    </CodeGroup>
+
+    <Note>
+      Notice how it searches the knowledge base and chat history when needed
+    </Note>
+  </Step>
+</Steps>
+
+## Attributes
+
+| Parameter                  | Type                                  | Default | Description                                                                                                                                                                                                 |
+| -------------------------- | ------------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `knowledge`                | `AgentKnowledge`                      | `None`  | Provides the knowledge base used by the agent.                                                                                                                                                              |
+| `search_knowledge`         | `bool`                                | `True`  | Adds a tool that allows the Model to search the knowledge base (aka Agentic RAG). Enabled by default when `knowledge` is provided.                                                                          |
+| `add_references`           | `bool`                                | `False` | Enable RAG by adding references from AgentKnowledge to the user prompt.                                                                                                                                     |
+| `retriever`                | `Callable[..., Optional[list[dict]]]` | `None`  | Function to get context to add to the user message. This function is called when add\_references is True.                                                                                                   |
+| `context_format`           | `Literal['json', 'yaml']`             | `json`  | Specifies the format for RAG, either "json" or "yaml".                                                                                                                                                      |
+| `add_context_instructions` | `bool`                                | `False` | If True, add instructions for using the context to the system prompt (if knowledge is also provided). For example: add an instruction to prefer information from the knowledge base over its training data. |
+
+## Developer Resources
+
+* View [Cookbook](https://github.com/agno-agi/agno/tree/main/cookbook/agent_concepts/knowledge)
