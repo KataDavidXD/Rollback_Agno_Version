@@ -1,4 +1,17 @@
-  agno>=0.1.0
-  openai
-  sqlalchemy
-  packaging
+# Core dependencies
+agno>=0.1.0
+openai>=1.0.0
+
+# Database
+# SQLite3 is included with Python
+
+# Testing
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+
+# Optional: For development
+python-dotenv>=1.0.0
+
+sqlalchemy
+
+socksio

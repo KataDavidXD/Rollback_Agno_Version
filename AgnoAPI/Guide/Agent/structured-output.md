@@ -1,0 +1,144 @@
+# Structured Output
+
+One of our favorite features is using Agents to generate structured data (i.e. a pydantic model). Use this feature to extract features, classify data, produce fake data etc. The best part is that they work with function calls, knowledge bases and all other features.
+
+## Example
+
+Let's create an Movie Agent to write a `MovieScript` for us.
+
+```python movie_agent.py
+from typing import List
+from rich.pretty import pprint
+from pydantic import BaseModel, Field
+from agno.agent import Agent, RunResponse
+from agno.models.openai import OpenAIChat
+
+class MovieScript(BaseModel):
+    setting: str = Field(..., description="Provide a nice setting for a blockbuster movie.")
+    ending: str = Field(..., description="Ending of the movie. If not available, provide a happy ending.")
+    genre: str = Field(
+        ..., description="Genre of the movie. If not available, select action, thriller or romantic comedy."
+    )
+    name: str = Field(..., description="Give a name to this movie")
+    characters: List[str] = Field(..., description="Name of characters for this movie.")
+    storyline: str = Field(..., description="3 sentence storyline for the movie. Make it exciting!")
+
+# Agent that uses JSON mode
+json_mode_agent = Agent(
+    model=OpenAIChat(id="gpt-4o"),
+    description="You write movie scripts.",
+    response_model=MovieScript,
+    use_json_mode=True,
+)
+json_mode_agent.print_response("New York")
+
+# Agent that uses structured outputs
+structured_output_agent = Agent(
+    model=OpenAIChat(id="gpt-4o"),
+    description="You write movie scripts.",
+    response_model=MovieScript,
+)
+
+structured_output_agent.print_response("New York")
+```
+
+Run the script to see the output.
+
+```bash
+pip install -U agno openai
+
+python movie_agent.py
+```
+
+The output is an object of the `MovieScript` class, here's how it looks:
+
+```python
+# Using JSON mode
+MovieScript(
+│   setting='The bustling streets of New York City, filled with skyscrapers, secret alleyways, and hidden underground passages.',
+│   ending='The protagonist manages to thwart an international conspiracy, clearing his name and winning the love of his life back.',
+│   genre='Thriller',
+│   name='Shadows in the City',
+│   characters=['Alex Monroe', 'Eva Parker', 'Detective Rodriguez', 'Mysterious Mr. Black'],
+│   storyline="When Alex Monroe, an ex-CIA operative, is framed for a crime he didn't commit, he must navigate the dangerous streets of New York to clear his name. As he uncovers a labyrinth of deceit involving the city's most notorious crime syndicate, he enlists the help of an old flame, Eva Parker. Together, they race against time to expose the true villain before it's too late."
+)
+
+# Use the structured output
+MovieScript(
+│   setting='In the bustling streets and iconic skyline of New York City.',
+│   ending='Isabella and Alex, having narrowly escaped the clutches of the Syndicate, find themselves standing at the top of the Empire State Building. As the glow of the setting sun bathes the city, they share a victorious kiss. Newly emboldened and as an unstoppable duo, they vow to keep NYC safe from any future threats.',
+│   genre='Action Thriller',
+│   name='The NYC Chronicles',
+│   characters=['Isabella Grant', 'Alex Chen', 'Marcus Kane', 'Detective Ellie Monroe', 'Victor Sinclair'],
+│   storyline='Isabella Grant, a fearless investigative journalist, uncovers a massive conspiracy involving a powerful syndicate plotting to control New York City. Teaming up with renegade cop Alex Chen, they must race against time to expose the culprits before the city descends into chaos. Dodging danger at every turn, they fight to protect the city they love from imminent destruction.'
+)
+```
+
+## Using a Parser Model
+
+You can use an additional model to parse and structure the output from your primary model. This approach is particularly effective when the primary model is optimized for reasoning tasks, as such models may not consistently produce detailed structured responses.
+
+```python
+agent = Agent(
+    model=Claude(id="claude-sonnet-4-20250514"),
+    description="You write movie scripts.",
+    response_model=MovieScript,
+    parser_model=OpenAIChat(id="gpt-4o"),
+)
+```
+
+You can also provide a custom `parser_model_prompt` to your Parser Model.
+
+## Streaming Structured Output
+
+Streaming can be used in combination with `response_model`. This returns the structured output as a single event in the stream of events.
+
+```python streaming_agent.py
+import asyncio
+from typing import Dict, List
+
+from agno.agent import Agent
+from agno.models.openai.chat import OpenAIChat
+from pydantic import BaseModel, Field
+
+
+class MovieScript(BaseModel):
+    setting: str = Field(
+        ..., description="Provide a nice setting for a blockbuster movie."
+    )
+    ending: str = Field(
+        ...,
+        description="Ending of the movie. If not available, provide a happy ending.",
+    )
+    genre: str = Field(
+        ...,
+        description="Genre of the movie. If not available, select action, thriller or romantic comedy.",
+    )
+    name: str = Field(..., description="Give a name to this movie")
+    characters: List[str] = Field(..., description="Name of characters for this movie.")
+    storyline: str = Field(
+        ..., description="3 sentence storyline for the movie. Make it exciting!"
+    )
+    rating: Dict[str, int] = Field(
+        ...,
+        description="Your own rating of the movie. 1-10. Return a dictionary with the keys 'story' and 'acting'.",
+    )
+
+
+# Agent that uses structured outputs with streaming
+structured_output_agent = Agent(
+    model=OpenAIChat(id="gpt-4o"),
+    description="You write movie scripts.",
+    response_model=MovieScript,
+)
+
+structured_output_agent.print_response(
+    "New York", stream=True, stream_intermediate_steps=True
+)
+```
+
+## Developer Resources
+
+* View [Cookbook](https://github.com/agno-agi/agno/blob/main/cookbook/agent_concepts/async/structured_output.py)
+* View [Parser Model Cookbook](https://github.com/agno-agi/agno/blob/main/cookbook/agent_concepts/other/parse_model.py)
+* View [Streaming Structured Output](https://github.com/agno-agi/agno/blob/main/cookbook/models/openai/chat/structured_output_stream.py)
