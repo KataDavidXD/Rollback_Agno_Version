@@ -3,7 +3,7 @@
 Extends Agno's Agent to add automatic checkpoint creation and database persistence.
 """
 
-from typing import Optional, Dict, Any, List, Callable
+from typing import Optional, Dict, Any, List, Callable, Mapping
 from datetime import datetime
 import uuid
 
@@ -13,6 +13,7 @@ from agno.storage.sqlite import SqliteStorage
 from src.sessions.internal_session import InternalSession
 from src.checkpoints.checkpoint import Checkpoint
 from src.database.repositories.external_session_repository import ExternalSessionRepository
+from rollback_portocal import ToolRollbackRegistry, ToolSpec
 
 
 class RollbackAgent(Agent):
@@ -39,6 +40,7 @@ class RollbackAgent(Agent):
         internal_session_repo=None,
         checkpoint_repo=None,
         skip_session_creation: bool = False,
+        reverse_tools: Optional[Mapping[str, Callable[[Mapping[str, Any], Any], Any]]] = None,
         **kwargs
     ):
         """Initialize the RollbackAgent.
@@ -66,14 +68,35 @@ class RollbackAgent(Agent):
         # Track tool usage for automatic checkpointing
         self._tool_was_called = False
         self._last_tool_called = None
+        self.tool_rollback_registry = ToolRollbackRegistry()
+        self._reverse_tools_map: Dict[str, Callable[[Mapping[str, Any], Any], Any]] = dict(reverse_tools or {})
         
         # Create a tool hook to detect tool calls
         def checkpoint_hook(function_name: str, function_call, arguments: Dict[str, Any]):
             """Hook that tracks tool calls for automatic checkpointing."""
             self._tool_was_called = True
             self._last_tool_called = function_name
-            # Execute the actual tool
-            return function_call(**arguments)
+            try:
+                result = function_call(**arguments)
+                # Record only if the tool is registered in the rollback registry
+                if self.tool_rollback_registry.get_tool(function_name) is not None:
+                    self.tool_rollback_registry.record_invocation(
+                        function_name,
+                        arguments,
+                        result,
+                        success=True,
+                    )
+                return result
+            except Exception as e:
+                if self.tool_rollback_registry.get_tool(function_name) is not None:
+                    self.tool_rollback_registry.record_invocation(
+                        function_name,
+                        arguments,
+                        None,
+                        success=False,
+                        error_message=str(e),
+                    )
+                raise
         
         # Add our hook to any existing hooks
         if 'tool_hooks' not in kwargs:
@@ -115,6 +138,33 @@ class RollbackAgent(Agent):
         # Flags for restored state
         self._restored_from_checkpoint = False
         self._restored_history = []
+
+        # Register user-provided tools that have reverse handlers into rollback registry
+        # We intentionally avoid registering checkpoint-management tools
+        provided_tools = []
+        if 'tools' in kwargs and isinstance(kwargs['tools'], list):
+            provided_tools = kwargs['tools']
+
+        for tool in provided_tools:
+            try:
+                tool_name = getattr(tool, '__name__', None)
+                if not tool_name:
+                    continue
+                # Skip our internal checkpoint tools
+                if self._is_checkpoint_tool(tool_name):
+                    continue
+                reverse_fn = self._reverse_tools_map.get(tool_name)
+                # Register only if a reverse function is provided
+                if reverse_fn is not None:
+                    # Wrap forward to accept Mapping[str, Any] and call with kwargs
+                    def _forward_wrapper(args: Mapping[str, Any], _tool=tool):
+                        return _tool(**args)
+                    self.tool_rollback_registry.register_tool(
+                        ToolSpec(name=tool_name, forward=_forward_wrapper, reverse=reverse_fn)
+                    )
+            except Exception:
+                # Silently skip tools that cannot be registered
+                pass
         
         # Create internal session only if not skipping (for resume/rollback)
         if not skip_session_creation:
@@ -314,6 +364,10 @@ class RollbackAgent(Agent):
                 checkpoint_name=name,
                 is_auto=True
             )
+            # Store current tool track position in checkpoint metadata
+            current_track = self.tool_rollback_registry.get_track()
+            checkpoint.metadata["tool_track_position"] = len(current_track)
+            
             self.checkpoint_repo.create(checkpoint)
             self.internal_session.checkpoint_count += 1
     
@@ -336,6 +390,10 @@ class RollbackAgent(Agent):
                 checkpoint_name=name,
                 is_auto=False
             )
+            # Store current tool track position in checkpoint metadata
+            current_track = self.tool_rollback_registry.get_track()
+            checkpoint.metadata["tool_track_position"] = len(current_track)
+            
             saved_checkpoint = self.checkpoint_repo.create(checkpoint)
             self.internal_session.checkpoint_count += 1
             self._save_internal_session()
@@ -515,6 +573,79 @@ class RollbackAgent(Agent):
         """
         return self.internal_session.session_state
     
+    # --- Tool rollback/redo helpers ---
+    def rollback_tools(self) -> List[Any]:
+        """Run reverse handlers for recorded tools in reverse order.
+
+        Returns list of reverse invocation results.
+        """
+        return self.tool_rollback_registry.rollback()
+
+    def rollback_tools_from_track_index(self, start_index: int) -> List[Any]:
+        """Run reverse handlers for recorded tools from specific track index.
+        
+        Args:
+            start_index: Index in the tool track to start rollback from (inclusive).
+                        Tools from this index onwards will be reversed.
+        
+        Returns:
+            List of reverse invocation results.
+        """
+        from rollback_portocal.protocol import CHECKPOINT_TOOL_NAMES, ReverseInvocationResult
+        
+        track = self.tool_rollback_registry.get_track()
+        results = []
+        
+        # Rollback tools from start_index to end in reverse order
+        for i in range(len(track) - 1, start_index - 1, -1):
+            record = track[i]
+            tool_name = record.tool_name
+            
+            # Skip checkpoint tools
+            if tool_name in CHECKPOINT_TOOL_NAMES:
+                continue
+                
+            spec = self.tool_rollback_registry.get_tool(tool_name)
+            if not spec or spec.reverse is None:
+                results.append(
+                    ReverseInvocationResult(
+                        tool_name=tool_name,
+                        reversed_successfully=False,
+                        error_message="No reverse handler registered",
+                    )
+                )
+                continue
+                
+            try:
+                spec.reverse(record.args, record.result)
+                results.append(
+                    ReverseInvocationResult(
+                        tool_name=tool_name,
+                        reversed_successfully=True,
+                    )
+                )
+            except Exception as e:
+                results.append(
+                    ReverseInvocationResult(
+                        tool_name=tool_name,
+                        reversed_successfully=False,
+                        error_message=str(e),
+                    )
+                )
+        
+        return results
+
+    def redo_tools(self) -> List[Any]:
+        """Re-execute forward handlers for recorded tools in original order.
+
+        Returns list of new invocation records appended to the track.
+        """
+        return self.tool_rollback_registry.redo()
+
+    def get_tool_track(self) -> List[Any]:
+        """Return current recorded tool invocation track."""
+        return self.tool_rollback_registry.get_track()
+
     def get_messages_for_session(self, **kwargs):
         """Override to inject restored conversation history when applicable.
         

@@ -5,7 +5,7 @@ Handles agent creation, rollback operations, and session management.
 
 from typing import Optional, Dict, Any
 from datetime import datetime
-
+import os
 from agno.models.openai import OpenAIChat
 
 from src.agents.rollback_agent import RollbackAgent
@@ -34,17 +34,34 @@ class AgentService:
         self.checkpoint_repo = CheckpointRepository()
         
         # Default model configuration
+        base_url = os.getenv("BASE_URL")
+        api_key = os.getenv("OPENAI_API_KEY")
+        base_url = self._sanitize_base_url(base_url)
         self.model_config = model_config or {
             "id": "gpt-4o-mini",
-            "temperature": 0.7
+            "temperature": 0.7,
+            "api_key": api_key,
+            "base_url": base_url
         }
         
         self.current_agent: Optional[RollbackAgent] = None
+
+    def _sanitize_base_url(self, raw_url: Optional[str]) -> Optional[str]:
+        if not raw_url:
+            return None
+        url = raw_url.strip().rstrip("/")
+        if not url:
+            return None
+        if not (url.startswith("http://") or url.startswith("https://")):
+            url = "https://" + url
+        return url
     
     def create_new_agent(
         self,
         external_session_id: int,
         session_name: Optional[str] = None,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
         **agent_kwargs
     ) -> RollbackAgent:
         """Create a new RollbackAgent for an external session.
@@ -52,13 +69,22 @@ class AgentService:
         Args:
             external_session_id: ID of the external session.
             session_name: Optional name for the internal session.
+            base_url: Optional base URL for the model provider (overrides defaults/env if provided).
+            api_key: Optional API key for the model provider (overrides defaults/env if provided).
             **agent_kwargs: Additional arguments for the agent.
             
         Returns:
             The created RollbackAgent instance.
         """
+        # Resolve effective model configuration (allow per-call overrides)
+        effective_model_config = dict(self.model_config)
+        if api_key:
+            effective_model_config["api_key"] = api_key
+        if base_url:
+            effective_model_config["base_url"] = self._sanitize_base_url(base_url)
+        
         # Create the model
-        model = OpenAIChat(**self.model_config)
+        model = OpenAIChat(**effective_model_config)
         
         # Create the agent with repositories
         agent = RollbackAgent(
@@ -84,7 +110,9 @@ class AgentService:
     def resume_agent(
         self,
         external_session_id: int,
-        internal_session_id: Optional[int] = None
+        internal_session_id: Optional[int] = None,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None
     ) -> Optional[RollbackAgent]:
         """Resume an existing agent session.
         
@@ -92,6 +120,8 @@ class AgentService:
             external_session_id: ID of the external session.
             internal_session_id: Optional specific internal session to resume.
                                If None, uses the current internal session.
+            base_url: Optional base URL for the model provider (overrides defaults/env if provided).
+            api_key: Optional API key for the model provider (overrides defaults/env if provided).
             
         Returns:
             The resumed RollbackAgent instance, or None if not found.
@@ -112,7 +142,12 @@ class AgentService:
             return self.create_new_agent(external_session_id)
         
         # Create agent and restore state
-        model = OpenAIChat(**self.model_config)
+        effective_model_config = dict(self.model_config)
+        if api_key:
+            effective_model_config["api_key"] = api_key
+        if base_url:
+            effective_model_config["base_url"] = self._sanitize_base_url(base_url)
+        model = OpenAIChat(**effective_model_config)
         
         agent = RollbackAgent(
             external_session_id=external_session_id,
@@ -136,19 +171,42 @@ class AgentService:
     def rollback_to_checkpoint(
         self,
         external_session_id: int,
-        checkpoint_id: int
+        checkpoint_id: int,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        rollback_tools: bool = True
     ) -> Optional[RollbackAgent]:
         """Create a new agent from a checkpoint (rollback operation).
         
         Args:
             external_session_id: ID of the external session.
             checkpoint_id: ID of the checkpoint to rollback to.
+            base_url: Optional base URL for the model provider (overrides defaults/env if provided).
+            api_key: Optional API key for the model provider (overrides defaults/env if provided).
+            rollback_tools: Whether to rollback tool operations after the checkpoint.
             
         Returns:
             A new RollbackAgent with the checkpoint's state, or None if failed.
         """
         try:
-            model = OpenAIChat(**self.model_config)
+            # If we have a current agent and rollback_tools is enabled, 
+            # rollback tool operations after the checkpoint first
+            if rollback_tools and self.current_agent:
+                checkpoint = self.checkpoint_repo.get_by_id(checkpoint_id)
+                if checkpoint and "tool_track_position" in checkpoint.metadata:
+                    tool_track_position = checkpoint.metadata["tool_track_position"]
+                    print(f"Rolling back tools from position {tool_track_position}...")
+                    reverse_results = self.current_agent.rollback_tools_from_track_index(tool_track_position)
+                    for rr in reverse_results:
+                        if not rr.reversed_successfully:
+                            print(f"Warning: Failed to reverse {rr.tool_name}: {rr.error_message}")
+            
+            effective_model_config = dict(self.model_config)
+            if api_key:
+                effective_model_config["api_key"] = api_key
+            if base_url:
+                effective_model_config["base_url"] = self._sanitize_base_url(base_url)
+            model = OpenAIChat(**effective_model_config)
             
             agent = RollbackAgent.from_checkpoint(
                 checkpoint_id=checkpoint_id,

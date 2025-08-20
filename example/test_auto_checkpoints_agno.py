@@ -14,16 +14,12 @@ from src.agents.agent_service import AgentService
 from src.auth.auth_service import AuthService
 from src.sessions.external_session import ExternalSession
 from src.database.repositories.external_session_repository import ExternalSessionRepository
-
+from agno.tools.baidusearch import BaiduSearchTools
 
 def simple_calculator(a: float, b: float) -> float:
     """Add two numbers together."""
     return a + b
 
-def simple_calculator_reverse(args, result):
-    """Reverse handler for simple_calculator (no side effects to undo)."""
-    # In a real tool that changes external state, implement reversal here.
-    return None
 
 def main():
     """Test automatic checkpoint creation."""
@@ -54,14 +50,19 @@ def main():
 
     agent = agent_service.create_new_agent(
         external_session_id=external_session.id,
-        tools=[simple_calculator],
-        reverse_tools={"simple_calculator": simple_calculator_reverse},
+        tools=[BaiduSearchTools()],
+        description="You are a search agent that helps users find the most relevant information using Baidu.",
+        instructions=[
+            "Given a topic by the user, respond with the 3 most relevant search results about that topic.",
+            "Search for 5 results and select the top 3 unique items.",
+            "Search in both English and Chinese.",
+        ],
         base_url=base_url,
         api_key=api_key
         # show_tool_calls=True is already set by default in agent_service
     )
     
-    print("Agent created with custom calculator tool\n")
+    print("Agent created with custom Baidu search tool\n")
     
     # Initial checkpoint count
     initial_checkpoints = agent.checkpoint_repo.get_by_internal_session(
@@ -72,8 +73,8 @@ def main():
     
     # Test 1: Use custom tool
     print("\nTest 1: Using custom tool")
-    print("User: Calculate 5 + 3")
-    response = agent.run("Calculate 5 + 3 using the calculator tool")
+    print("User: What is the weather in Beijing?")
+    response = agent.run("What is the weather in Beijing?")
     print(f"Assistant: {response.content if hasattr(response, 'content') else response}")
     
     # Check if response has tool_calls attribute
@@ -81,15 +82,6 @@ def main():
     if hasattr(response, 'tool_calls'):
         print(f"Tool calls: {response.tool_calls}")
     
-    # Show recorded tool invocations (from rollback registry)
-    try:
-        track = agent.get_tool_track()
-        print(f"\nRecorded tool invocations: {len(track)}")
-        for rec in track:
-            print(f"  - {rec.tool_name} args={rec.args} success={rec.success}")
-    except Exception as e:
-        print(f"Could not read tool track: {e}")
-
     # Check checkpoints after custom tool
     checkpoints_after_custom = agent.checkpoint_repo.get_by_internal_session(
         agent.internal_session.id,
@@ -110,15 +102,6 @@ def main():
     )
     print(f"\nCheckpoints after checkpoint tool: {len(checkpoints_after_checkpoint)}")
     
-    # Optionally demonstrate tool rollback (reverse handlers)
-    print("\nAttempting to rollback recorded tool effects...")
-    try:
-        reverse_results = agent.rollback_tools()
-        for rr in reverse_results:
-            print(f"  - reversed {rr.tool_name}: success={rr.reversed_successfully} error={rr.error_message}")
-    except Exception as e:
-        print(f"Rollback failed: {e}")
-
     # List all checkpoints with details
     print("\n=== All Checkpoints ===")
     all_checkpoints = agent.checkpoint_repo.get_by_internal_session(

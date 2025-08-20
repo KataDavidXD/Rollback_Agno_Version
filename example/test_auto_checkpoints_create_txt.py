@@ -6,6 +6,7 @@ Test script to verify automatic checkpoint creation with custom tools.
 import os
 import sys
 from pathlib import Path
+from time import sleep
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -15,14 +16,19 @@ from src.auth.auth_service import AuthService
 from src.sessions.external_session import ExternalSession
 from src.database.repositories.external_session_repository import ExternalSessionRepository
 
+sleep_n = 2 # SLEEP TIME FOR DEBUG
 
-def simple_calculator(a: float, b: float) -> float:
-    """Add two numbers together."""
-    return a + b
+def create_file(path: str) -> dict:
+    """Create an empty file and return its path."""
+    open(path, "w").close()
+    return {"path": path}
 
-def simple_calculator_reverse(args, result):
-    """Reverse handler for simple_calculator (no side effects to undo)."""
-    # In a real tool that changes external state, implement reversal here.
+def delete_file(args, result):
+    """Reverse handler to delete the created file if it exists."""
+    import os as _os
+    file_path = result.get("path") if isinstance(result, dict) else None
+    if file_path and _os.path.exists(file_path):
+        _os.remove(file_path)
     return None
 
 def main():
@@ -54,14 +60,15 @@ def main():
 
     agent = agent_service.create_new_agent(
         external_session_id=external_session.id,
-        tools=[simple_calculator],
-        reverse_tools={"simple_calculator": simple_calculator_reverse},
+        tools=[create_file],
+        reverse_tools={"create_file": delete_file},
         base_url=base_url,
         api_key=api_key
         # show_tool_calls=True is already set by default in agent_service
     )
     
     print("Agent created with custom calculator tool\n")
+    sleep(sleep_n)
     
     # Initial checkpoint count
     initial_checkpoints = agent.checkpoint_repo.get_by_internal_session(
@@ -70,18 +77,20 @@ def main():
     )
     print(f"Initial checkpoints: {len(initial_checkpoints)}")
     
-    # Test 1: Use custom tool
-    print("\nTest 1: Using custom tool")
-    print("User: Calculate 5 + 3")
-    response = agent.run("Calculate 5 + 3 using the calculator tool")
+    # Test 1: Use custom tool to create a file
+    test_path = "tmp_test_file.txt"
+    print("\nTest 1: Using custom tool to create a file")
+    print(f"User: Create file at {test_path}")
+    response = agent.run(f"Use the create_file tool to create {test_path}")
     print(f"Assistant: {response.content if hasattr(response, 'content') else response}")
+    sleep(sleep_n)
     
     # Check if response has tool_calls attribute
     print(f"\nResponse has tool_calls: {hasattr(response, 'tool_calls')}")
     if hasattr(response, 'tool_calls'):
         print(f"Tool calls: {response.tool_calls}")
     
-    # Show recorded tool invocations (from rollback registry)
+    # Show recorded tool invocations (from rollback registry) BEFORE rollback
     try:
         track = agent.get_tool_track()
         print(f"\nRecorded tool invocations: {len(track)}")
@@ -110,8 +119,12 @@ def main():
     )
     print(f"\nCheckpoints after checkpoint tool: {len(checkpoints_after_checkpoint)}")
     
+    # Verify file exists before rollback
+    print(f"\nFile exists before rollback: {os.path.exists(test_path)}")
+
     # Optionally demonstrate tool rollback (reverse handlers)
     print("\nAttempting to rollback recorded tool effects...")
+    sleep(sleep_n)
     try:
         reverse_results = agent.rollback_tools()
         for rr in reverse_results:
@@ -119,32 +132,21 @@ def main():
     except Exception as e:
         print(f"Rollback failed: {e}")
 
-    # List all checkpoints with details
-    print("\n=== All Checkpoints ===")
-    all_checkpoints = agent.checkpoint_repo.get_by_internal_session(
-        agent.internal_session.id,
-        auto_only=False
-    )
-    
-    for cp in all_checkpoints:
-        checkpoint_type = "AUTO" if cp.is_auto else "MANUAL"
-        name = cp.checkpoint_name or "Unnamed"
-        print(f"  [{checkpoint_type}] ID: {cp.id} | {name}")
-    
-    # Summary
-    auto_count = sum(1 for cp in all_checkpoints if cp.is_auto)
-    manual_count = sum(1 for cp in all_checkpoints if not cp.is_auto)
-    
-    print(f"\nSummary:")
-    print(f"  Automatic checkpoints: {auto_count}")
-    print(f"  Manual checkpoints: {manual_count}")
-    print(f"  Total: {len(all_checkpoints)}")
-    
-    if auto_count == 0:
-        print("\n❌ ISSUE: No automatic checkpoints created after custom tool use!")
-        print("   This needs to be fixed for proper rollback functionality.")
-    else:
-        print("\n✅ SUCCESS: Automatic checkpoints are being created!")
+    # Verify file removed after rollback
+    print(f"File exists after rollback: {os.path.exists(test_path)}")
+
+    # Demonstrate redo (recreate the file via forward tool replay)
+    try:
+        sleep(sleep_n)
+        redo_results = agent.redo_tools()
+        for rr in redo_results:
+            print(f"  - redo {rr.tool_name}: success={rr.success} error={rr.error_message}")
+    except Exception as e:
+        print(f"Redo failed: {e}")
+
+    # Verify file re-created after redo
+    print(f"File exists after redo: {os.path.exists(test_path)}")
+
 
 
 if __name__ == "__main__":
